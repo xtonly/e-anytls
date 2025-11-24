@@ -8,7 +8,7 @@
 #
 #   DESCRIPTION: A comprehensive, multilingual script for installing, configuring,
 #                managing Sing-box (VLESS + Vision + Reality).
-#                Based on the interaction logic of xray_manager.sh.
+#                (Fixes: KeyPair generation parsing and Debug mode included)
 #
 #====================================================================================
 
@@ -41,7 +41,7 @@ load_lang_en() {
     export CONFIGURING_SB=">>> Configuring Sing-box (VLESS-Vision-Reality)..."
     export PROMPT_PORT="Enter Service Port (default 54321): "
     export PROMPT_SNI="Enter a destination domain (default: www.microsoft.com): "
-    export ERROR_KEY_GENERATION_FAILED="Error: Failed to generate KeyPair!"
+    export ERROR_KEY_GENERATION_FAILED="Error: Failed to extract KeyPair from Sing-box output!"
     export WRITING_CONFIG="Writing server configuration file..."
     export SUCCESS_CONFIG_WRITTEN="Server configuration written successfully!"
     export CONFIGURING_FIREWALL="Configuring firewall..."
@@ -94,7 +94,7 @@ load_lang_zh() {
     export CONFIGURING_SB=">>> 正在为您配置 Sing-box (VLESS-Vision-Reality)..."
     export PROMPT_PORT="请输入服务端口 (默认 54321): "
     export PROMPT_SNI="请输入伪装域名 (SNI) (默认为 www.microsoft.com): "
-    export ERROR_KEY_GENERATION_FAILED="错误：生成密钥对失败！"
+    export ERROR_KEY_GENERATION_FAILED="错误：无法从 Sing-box 输出中提取密钥对！"
     export WRITING_CONFIG="正在写入服务器配置文件..."
     export SUCCESS_CONFIG_WRITTEN="服务器配置写入成功！"
     export CONFIGURING_FIREWALL="正在配置防火墙..."
@@ -182,7 +182,7 @@ install_singbox_core() {
     
     # Install dependencies
     apt-get update -y >/dev/null 2>&1
-    apt-get install -y curl wget tar openssl >/dev/null 2>&1
+    apt-get install -y curl wget tar openssl jq >/dev/null 2>&1
 
     if [ -f "$SB_INSTALL_PATH" ]; then color_echo GREEN "$SB_ALREADY_INSTALLED"; fi
 
@@ -190,7 +190,7 @@ install_singbox_core() {
     VERSION=$(curl -s https://api.github.com/repos/SagerNet/sing-box/releases/latest | grep '"tag_name":' | sed -E 's/.*"v([^"]+)".*/\1/')
     
     if [[ -z "$VERSION" ]]; then
-        color_echo RED "Failed to fetch latest version tag."
+        color_echo RED "Failed to fetch latest version tag. Please check network."
         return 1
     fi
 
@@ -205,6 +205,7 @@ install_singbox_core() {
 
     DOWNLOAD_URL="https://github.com/SagerNet/sing-box/releases/download/v${VERSION}/sing-box-${VERSION}-${PLATFORM}.tar.gz"
     
+    echo "Downloading: $DOWNLOAD_URL"
     wget -O sing-box.tar.gz "$DOWNLOAD_URL" >/dev/null 2>&1
     if [ $? -ne 0 ]; then
         color_echo RED "$ERROR_SB_INSTALL_FAILED"
@@ -216,7 +217,14 @@ install_singbox_core() {
     # Stop service if running before overwriting
     systemctl stop sing-box >/dev/null 2>&1
 
-    cp "sing-box-${VERSION}-${PLATFORM}/sing-box" "$SB_INSTALL_PATH"
+    # Find where it unpacked
+    if [ -d "sing-box-${VERSION}-${PLATFORM}" ]; then
+        cp "sing-box-${VERSION}-${PLATFORM}/sing-box" "$SB_INSTALL_PATH"
+    else
+        # Fallback search if folder structure changes
+        find . -name sing-box -type f -exec cp {} "$SB_INSTALL_PATH" \;
+    fi
+
     chmod +x "$SB_INSTALL_PATH"
     
     # Cleanup
@@ -229,27 +237,40 @@ configure_and_generate() {
     install_singbox_core
     color_echo BLUE "$CONFIGURING_SB"
     
-    # Create directories
+    # 1. 基础配置
     mkdir -p "$SB_CONFIG_DIR"
-
     read -rp "$PROMPT_PORT" LISTEN_PORT; LISTEN_PORT=${LISTEN_PORT:-54321}
     read -rp "$PROMPT_SNI" SNI; SNI=${SNI:-www.microsoft.com}
 
-    # Generate Credentials
+    # 2. 生成 UUID
     UUID=$($SB_INSTALL_PATH generate uuid)
-    KEYS=$($SB_INSTALL_PATH generate x25519-keypair)
-    PRIVATE_KEY=$(echo "$KEYS" | grep "Private Key" | awk '{print $3}')
-    PUBLIC_KEY=$(echo "$KEYS" | grep "Public Key" | awk '{print $3}')
+    echo "UUID Generated: $UUID"
+
+    # 3. 生成 KeyPair (增强版解析逻辑)
+    color_echo YELLOW "Generating KeyPair..."
+    
+    # 获取原始输出，包含 2>&1 以防 stderr
+    RAW_KEYS=$($SB_INSTALL_PATH generate x25519-keypair 2>&1)
+    
+    # 使用更通用的方式解析：以冒号为分隔符，取第二部分，并删除所有空格
+    PRIVATE_KEY=$(echo "$RAW_KEYS" | grep -i "Private Key" | awk -F ":" '{print $2}' | tr -d ' ')
+    PUBLIC_KEY=$(echo "$RAW_KEYS" | grep -i "Public Key" | awk -F ":" '{print $2}' | tr -d ' ')
     SHORT_ID=$(openssl rand -hex 8)
 
+    # 4. 检查是否生成成功，如果失败打印调试信息
     if [[ -z "$PRIVATE_KEY" || -z "$PUBLIC_KEY" ]]; then
         color_echo RED "$ERROR_KEY_GENERATION_FAILED"
+        echo "================ DEBUG INFO ================"
+        echo -e "Raw Output from sing-box:\n$RAW_KEYS"
+        echo "============================================"
+        echo "If the output above is empty or an error, the core binary might be corrupt."
         return 1
     fi
 
+    color_echo GREEN "Keys generated successfully."
     color_echo YELLOW "$WRITING_CONFIG"
     
-    # Generate Config JSON
+    # 5. 写入配置文件
     cat > "$SB_CONFIG_FILE" <<EOF
 {
   "log": {
@@ -293,7 +314,7 @@ configure_and_generate() {
 }
 EOF
 
-    # Generate Systemd Service
+    # 6. 配置 Systemd 服务
     cat > "$SERVICE_FILE" <<EOF
 [Unit]
 Description=sing-box service
@@ -315,7 +336,7 @@ EOF
 
     systemctl daemon-reload
 
-    # Save Node Info
+    # 7. 保存节点信息
     get_public_ip
     SERVER_HOSTNAME=$(hostname)
     
@@ -331,6 +352,7 @@ EOF
 
     color_echo GREEN "$SUCCESS_CONFIG_WRITTEN"
     
+    # 8. 防火墙与启动
     color_echo YELLOW "$CONFIGURING_FIREWALL"
     if command -v ufw &>/dev/null; then 
         ufw allow ${LISTEN_PORT}/tcp >/dev/null 2>&1
@@ -365,10 +387,10 @@ view_links() {
     color_echo GREEN "$NODE_INFO_HEADER"
     color_echo YELLOW "$VLESS_NODE_LINK"; echo "${VLESS_LINK}"
     echo ""
-    echo -e "SNI: ${SNI}"
-    echo -e "Public Key: ${PUBLIC_KEY}"
-    echo -e "Short ID: ${SHORT_ID}"
-    echo -e "UUID: ${UUID}"
+    echo -e "SNI:        ${YELLOW}${SNI}${PLAIN}"
+    echo -e "Public Key: ${YELLOW}${PUBLIC_KEY}${PLAIN}"
+    echo -e "Short ID:   ${YELLOW}${SHORT_ID}${PLAIN}"
+    echo -e "UUID:       ${YELLOW}${UUID}${PLAIN}"
     color_echo GREEN "$NODE_INFO_FOOTER"
 }
 
