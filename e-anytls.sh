@@ -8,7 +8,7 @@
 #
 #   DESCRIPTION: A comprehensive, multilingual script for installing, configuring,
 #                managing Sing-box (VLESS + Vision + Reality).
-#                (Fixes: KeyPair generation parsing and Debug mode included)
+#                (Fixes: Updated command 'reality-keypair' for v1.12+)
 #
 #====================================================================================
 
@@ -246,11 +246,12 @@ configure_and_generate() {
     UUID=$($SB_INSTALL_PATH generate uuid)
     echo "UUID Generated: $UUID"
 
-    # 3. 生成 KeyPair (增强版解析逻辑)
+    # 3. 生成 KeyPair (已修正命令为 reality-keypair)
     color_echo YELLOW "Generating KeyPair..."
     
     # 获取原始输出，包含 2>&1 以防 stderr
-    RAW_KEYS=$($SB_INSTALL_PATH generate x25519-keypair 2>&1)
+    # FIX: V1.12+ uses 'reality-keypair' instead of 'x25519-keypair'
+    RAW_KEYS=$($SB_INSTALL_PATH generate reality-keypair 2>&1)
     
     # 使用更通用的方式解析：以冒号为分隔符，取第二部分，并删除所有空格
     PRIVATE_KEY=$(echo "$RAW_KEYS" | grep -i "Private Key" | awk -F ":" '{print $2}' | tr -d ' ')
@@ -263,7 +264,7 @@ configure_and_generate() {
         echo "================ DEBUG INFO ================"
         echo -e "Raw Output from sing-box:\n$RAW_KEYS"
         echo "============================================"
-        echo "If the output above is empty or an error, the core binary might be corrupt."
+        echo "If you see the help menu above, the command syntax might have changed again."
         return 1
     fi
 
